@@ -594,21 +594,25 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
 
     /// @inheritdoc IUniswapV3PoolActions
     function swap(
-        address recipient,
-        bool zeroForOne,
-        int256 amountSpecified,
-        uint160 sqrtPriceLimitX96,
-        bytes calldata data
+        address recipient, // NOTE: receiver of the output amounts
+        bool zeroForOne, // NOTE: true if the amount in is token0, false if it's token1
+        int256 amountSpecified, // NOTE: the amount of the swap, which is negative for token1 and positive for token0
+        uint160 sqrtPriceLimitX96, // NOTE: the price limit of the swap
+        bytes calldata data // NOTE: arbitrary data to be passed to the callback
     ) external override noDelegateCall returns (int256 amount0, int256 amount1) {
         require(amountSpecified != 0, 'AS');
 
         Slot0 memory slot0Start = slot0;
 
         require(slot0Start.unlocked, 'LOK');
+
+        
         require(
             zeroForOne
                 ? sqrtPriceLimitX96 < slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 > TickMath.MIN_SQRT_RATIO
+                // NOTE: zeroForOne is True -> token0 is input, token1 is output -> priceLimit is min price
                 : sqrtPriceLimitX96 > slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 < TickMath.MAX_SQRT_RATIO,
+                // NOTE: zeroForOne is False -> token1 is input, token0 is output -> priceLimit is max price
             'SPL'
         );
 
@@ -616,38 +620,48 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
 
         SwapCache memory cache =
             SwapCache({
-                liquidityStart: liquidity,
-                blockTimestamp: _blockTimestamp(),
+                liquidityStart: liquidity, // NOTE: the liquidity at the beginning of the swap
+                blockTimestamp: _blockTimestamp(), // NOTE: the timestamp of the current block
                 feeProtocol: zeroForOne ? (slot0Start.feeProtocol % 16) : (slot0Start.feeProtocol >> 4),
-                secondsPerLiquidityCumulativeX128: 0,
-                tickCumulative: 0,
-                computedLatestObservation: false
+                // NOTE: feeProtocol value is dynamic setting for each token - token0 fee is lower 4 bits, token1 fee is higher 4 bits
+                secondsPerLiquidityCumulativeX128: 0, // NOTE: the seconds per liquidity accumulated
+                tickCumulative: 0, // NOTE: the tick accumulated
+                computedLatestObservation: false // NOTE: whether the latest observation is computed
             });
 
+        // NOTE: exactInput = True if the amount specified is positive -> positive amount is input_amount 
+        // NOTE: input_amount is amount of token0 or token1 is based on zeroForOne = True or False 
         bool exactInput = amountSpecified > 0;
 
+
+        // NOTE: Initialize the state of the swap 
         SwapState memory state =
             SwapState({
-                amountSpecifiedRemaining: amountSpecified,
-                amountCalculated: 0,
-                sqrtPriceX96: slot0Start.sqrtPriceX96,
-                tick: slot0Start.tick,
-                feeGrowthGlobalX128: zeroForOne ? feeGrowthGlobal0X128 : feeGrowthGlobal1X128,
-                protocolFee: 0,
-                liquidity: cache.liquidityStart
+                amountSpecifiedRemaining: amountSpecified, // NOTE: the remain amount to be swapped
+                amountCalculated: 0, // NOTE: the output amount already swapped
+                sqrtPriceX96: slot0Start.sqrtPriceX96, // NOTE: current price
+                tick: slot0Start.tick, // NOTE: current tick
+                feeGrowthGlobalX128: zeroForOne ? feeGrowthGlobal0X128 : feeGrowthGlobal1X128, // NOTE: global fee growth of the input token
+                // NOTE: fee is the fee of the input token
+                protocolFee: 0, // NOTE: amount of input token paid as protocol fee
+                liquidity: cache.liquidityStart // NOTE: current liquidity in range
             });
 
         // continue swapping as long as we haven't used the entire input/output and haven't reached the price limit
         while (state.amountSpecifiedRemaining != 0 && state.sqrtPriceX96 != sqrtPriceLimitX96) {
-            StepComputations memory step;
+            StepComputations memory step; // NOTE: the computation of the current step
 
-            step.sqrtPriceStartX96 = state.sqrtPriceX96;
+            step.sqrtPriceStartX96 = state.sqrtPriceX96; // NOTE: the price at the beginning of the step
 
+
+            // 1. Finding the next-tick 
+            ///NOTE: next The next initialized or uninitialized tick up to 256 ticks away from the current tick
+            ///NOTE: initialized Whether the next tick is initialized, as the function only searches within up to 256 ticks
             (step.tickNext, step.initialized) = tickBitmap.nextInitializedTickWithinOneWord(
                 state.tick,
                 tickSpacing,
                 zeroForOne
-            );
+            ); // NOTE: the next tick to swap to from the current tick in the swap direction
 
             // ensure that we do not overshoot the min/max tick, as the tick bitmap is not aware of these bounds
             if (step.tickNext < TickMath.MIN_TICK) {
@@ -656,28 +670,49 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                 step.tickNext = TickMath.MAX_TICK;
             }
 
-            // get the price for the next tick
+            // 1.1. get the price for the next tick
             step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext);
 
-            // compute values to swap to the target tick, price limit, or point where input/output amount is exhausted
+            // 2. Compute the amount to swap in/out TARGETING the next tick
+            // NOTE: compute values to swap to the target tick, 
+            // NOTE: UNTIL each of the following conditions are met:
+            // - price limit, 
+            // - point where input/output amount is exhausted
+
+            // Ouput: update the state of the swap
+            // - state current price 
+            // - state amountIn 
+            // - state amountOut
+            // - state feeAmount
             (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
-                state.sqrtPriceX96,
+                state.sqrtPriceX96, // NOTE: current price
                 (zeroForOne ? step.sqrtPriceNextX96 < sqrtPriceLimitX96 : step.sqrtPriceNextX96 > sqrtPriceLimitX96)
                     ? sqrtPriceLimitX96
-                    : step.sqrtPriceNextX96,
-                state.liquidity,
-                state.amountSpecifiedRemaining,
-                fee
+                    : step.sqrtPriceNextX96, // NOTE: the price limit of the swap -> Also target price
+                state.liquidity, // NOTE: current liquidity
+                state.amountSpecifiedRemaining, // NOTE: the remain amount to be swapped
+                fee // NOTE: the fee of the pool
             );
 
+            // 3. From swap-step result - update the state of the swap
+
             if (exactInput) {
+                // NOTE: if exactInput -> positive amount is input_amount = amountSpecifiedRemaining
+                // - Reduce (amountIn and feeAmount) from the amountSpecifiedRemaining
                 state.amountSpecifiedRemaining -= (step.amountIn + step.feeAmount).toInt256();
+                // NOTE: if exactInput -> negative amount is out_amount (amountCalculated)
+                // - Add (-amountOut) to the amountCalculated
                 state.amountCalculated = state.amountCalculated.sub(step.amountOut.toInt256());
             } else {
+                // NOTE: if exactOutput -> negative amount is out_amount = amountSpecifiedRemaining
+                // - Reduce (-amountOut) from the amountSpecifiedRemaining
                 state.amountSpecifiedRemaining += step.amountOut.toInt256();
+                // NOTE: if exactOutput -> positive amount is input_amount (amountCalculated)
+                // - Add (amountIn and feeAmount) to the amountCalculated
                 state.amountCalculated = state.amountCalculated.add((step.amountIn + step.feeAmount).toInt256());
             }
 
+            // NOTE: protocolFee is extracted a part off the feeAmount
             // if the protocol fee is on, calculate how much is owed, decrement feeAmount, and increment protocolFee
             if (cache.feeProtocol > 0) {
                 uint256 delta = step.feeAmount / cache.feeProtocol;
@@ -689,7 +724,8 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
             if (state.liquidity > 0)
                 state.feeGrowthGlobalX128 += FullMath.mulDiv(step.feeAmount, FixedPoint128.Q128, state.liquidity);
 
-            // shift tick if we reached the next price
+            // 4. Shift the tick if needed
+            // - shift tick if we reached the next price
             if (state.sqrtPriceX96 == step.sqrtPriceNextX96) {
                 // if the tick is initialized, run the tick transition
                 if (step.initialized) {
@@ -727,7 +763,11 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                 // recompute unless we're on a lower tick boundary (i.e. already transitioned ticks), and haven't moved
                 state.tick = TickMath.getTickAtSqrtRatio(state.sqrtPriceX96);
             }
-        }
+
+            
+        } // NOTE: end of while loop to swap
+
+
 
         // update tick and write an oracle entry if the tick change
         if (state.tick != slot0Start.tick) {

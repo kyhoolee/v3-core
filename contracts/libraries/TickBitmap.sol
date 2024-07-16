@@ -56,6 +56,7 @@ library TickBitmap {
 
             // if there are no initialized ticks to the right of or at the current tick, return rightmost in the word
             initialized = masked != 0;
+
             // overflow/underflow is possible, but prevented externally by limiting both tickSpacing and tick
             next = initialized
                 ? (compressed - int24(bitPos - BitMath.mostSignificantBit(masked))) * tickSpacing
@@ -69,6 +70,7 @@ library TickBitmap {
 
             // if there are no initialized ticks to the left of the current tick, return leftmost in the word
             initialized = masked != 0;
+            
             // overflow/underflow is possible, but prevented externally by limiting both tickSpacing and tick
             next = initialized
                 ? (compressed + 1 + int24(BitMath.leastSignificantBit(masked) - bitPos)) * tickSpacing
