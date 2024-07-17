@@ -618,6 +618,9 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
 
         slot0.unlocked = false;
 
+
+        ///***************************************************************************************************************///
+
         SwapCache memory cache =
             SwapCache({
                 liquidityStart: liquidity, // NOTE: the liquidity at the beginning of the swap
@@ -766,7 +769,7 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
 
             
         } // NOTE: end of while loop to swap
-
+        ///***************************************************************************************************************///
 
 
         // update tick and write an oracle entry if the tick change
